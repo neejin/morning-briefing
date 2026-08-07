@@ -12,6 +12,19 @@ index.html / index.md (항상 최신) 와 archive/YYYY-MM-DD_모닝브리핑.htm
   ANTHROPIC_API_KEY - Anthropic API 키 (필수, GitHub Actions secret 으로 주입됨)
 
 실패하면 0이 아닌 종료 코드로 끝나서 워크플로우가 실패로 표시됩니다.
+
+비용/시간 최적화 (2026-08-07 2차 수정):
+  - system 프롬프트(스타일가이드+템플릿, 고정 텍스트)에 prompt caching cache_control을
+    걸어서, 하나의 요청 안에서 반복되는 web_search 내부 턴들이 이 고정 텍스트를 매번
+    새로 처리하지 않고 캐시에서 읽도록 함 (claude-sonnet-5는 server tool 사용 시
+    cache_control이 있으면 서버가 각 내부 턴마다 자동으로 캐시 브레이크포인트를 추가함).
+  - claude-sonnet-5는 구버전 extended thinking(thinking.budget_tokens)을 지원하지 않고
+    reject(400 에러)한다. 대신 adaptive thinking + output_config.effort로 사고 깊이를
+    제어한다. API 기본값은 effort="high"이며, 명시적으로 "medium"으로 낮춰 thinking
+    토큰과 과도한 tool-call 반복을 줄인다.
+  - web_search max_uses를 14 -> 12로 낮추고, 프롬프트에 검색 예산 절약 지침을 추가했다.
+  - max_tokens를 64000 -> 40000으로 낮췄다 (2026-08-07 3차 실행 실측 output_tokens는
+    28,587이었으므로 truncation 재발을 막을 여유를 남기면서도 상한을 낮췄다).
 """
 
 import os
@@ -29,8 +42,9 @@ INDEX_MD = REPO_ROOT / "index.md"
 ARCHIVE_DIR = REPO_ROOT / "archive"
 
 MODEL = "claude-sonnet-5"
-MAX_TOKENS = 64000
-WEB_SEARCH_MAX_USES = 14
+MAX_TOKENS = 40000
+WEB_SEARCH_MAX_USES = 12
+EFFORT = "medium"
 
 HTML_START = "===HTML_START==="
 HTML_END = "===HTML_END==="
@@ -379,8 +393,24 @@ def build_system_prompt():
         "추정해서 쓰지 마세요."
     )
 
+    search_efficiency_note = (
+        "검색 효율화 지침(중요, 비용/시간 절약): 이번 요청에서 web_search는 최대 "
+        + str(WEB_SEARCH_MAX_USES) + "회로 제한됩니다. 이 예산 안에서 최대한 적은 "
+        "검색 횟수로 필요한 데이터를 모두 확보하세요. "
+        "1순위 소스(investing.com)에서 이미 신뢰할 수 있는 값을 얻었다면, 같은 값을 "
+        "다시 확인하려고 2순위 소스(Yahoo Finance)를 추가로 검색하지 마세요 — 2순위는 "
+        "1순위에서 값을 못 찾았을 때만 사용합니다. "
+        "가능하면 여러 자산을 한 번에 보여주는 개요/요약 페이지를 우선 활용해서 검색 "
+        "횟수를 아끼고, 그래도 검색 예산이 부족해지면 우선순위가 높은 자산(주가지수, "
+        "채권금리)부터 확인하세요. "
+        "검색 예산 소진으로 일부 항목을 끝내 확인하지 못했다면 절대로 추정치를 만들어 "
+        "내지 말고, 해당 항목에 '확인 안됨'이라고 명시하세요."
+    )
+
     parts = [
         persona,
+        "",
+        search_efficiency_note,
         "",
         "=== 스타일 가이드 시작 ===",
         STYLE_GUIDE,
@@ -453,7 +483,13 @@ def call_claude(system_prompt, user_prompt):
     response = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=system_prompt,
+        system=[
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
         messages=[{"role": "user", "content": user_prompt}],
         tools=[
             {
@@ -462,6 +498,7 @@ def call_claude(system_prompt, user_prompt):
                 "max_uses": WEB_SEARCH_MAX_USES,
             }
         ],
+        output_config={"effort": EFFORT},
     )
 
     if response.stop_reason == "max_tokens":
@@ -490,7 +527,7 @@ def main():
     system_prompt = build_system_prompt()
     user_prompt = build_user_prompt(now_kst, candidate_us_close)
 
-    print("Calling Claude API (model=" + MODEL + ")...")
+    print("Calling Claude API (model=" + MODEL + ", effort=" + EFFORT + ", max_tokens=" + str(MAX_TOKENS) + ", web_search_max_uses=" + str(WEB_SEARCH_MAX_USES) + ")...")
     raw_text = call_claude(system_prompt, user_prompt)
 
     html_content = extract_block(raw_text, HTML_START, HTML_END)
