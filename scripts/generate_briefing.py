@@ -29,7 +29,7 @@ INDEX_MD = REPO_ROOT / "index.md"
 ARCHIVE_DIR = REPO_ROOT / "archive"
 
 MODEL = "claude-sonnet-5"
-MAX_TOKENS = 16000
+MAX_TOKENS = 64000
 WEB_SEARCH_MAX_USES = 14
 
 HTML_START = "===HTML_START==="
